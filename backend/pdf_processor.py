@@ -177,12 +177,16 @@ def process_pdfs():
             for chunk_idx, chunk in enumerate(chunks, 1):
                 try:
                     # Generate embedding for chunk using Gemini
-                    embedding_result = genai.embed_content(
-                        model="models/text-embedding-004",
-                        content=chunk,
-                        task_type="RETRIEVAL_DOCUMENT"
-                    )
-                    embedding_list = embedding_result['embedding']
+                    try:
+                        result = genai.embed_content(
+                            model="models/text-embedding-004",
+                            content=chunk,
+                            task_type="RETRIEVAL_DOCUMENT"
+                        )
+                        embedding = result['embedding']
+                    except Exception as e:
+                        print(f"Error embedding chunk: {e}. Skipping...")
+                        continue
                     
                     # Create metadata
                     metadata = {
@@ -199,7 +203,7 @@ def process_pdfs():
                     insert_result = supabase.table('mcs_documents').insert({
                         'content': chunk,
                         'metadata': metadata,
-                        'embedding': embedding_list
+                        'embedding': embedding
                     }).execute()
                     
                     uploaded_count += 1

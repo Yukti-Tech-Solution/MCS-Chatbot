@@ -136,7 +136,7 @@ def search_similar_documents(query: str, top_k: int = 3) -> list:
             content=query,
             task_type="RETRIEVAL_QUERY"
         )
-        query_embedding_list = result['embedding']
+        query_embedding = result['embedding']
         print("Embedding generated successfully!")
         
         # Query Supabase using RPC function for vector similarity search
@@ -149,7 +149,7 @@ def search_similar_documents(query: str, top_k: int = 3) -> list:
             response = supabase.rpc(
                 'match_documents',
                 {
-                    'query_embedding': query_embedding_list,
+                    'query_embedding': query_embedding,
                     'match_threshold': 0.5,
                     'match_count': top_k
                 }

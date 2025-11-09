@@ -4,8 +4,8 @@ Extracts text from PDF files, chunks them, generates embeddings, and uploads to 
 """
 
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
 from supabase import create_client, Client
+import google.generativeai as genai
 import os
 import json
 from dotenv import load_dotenv
@@ -17,15 +17,19 @@ load_dotenv()
 # Load environment variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Validate environment variables
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Missing SUPABASE_URL or SUPABASE_KEY in environment variables")
 
-# Initialize SentenceTransformer model
-print("Loading embedding model...")
-model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-print("Embedding model loaded successfully!")
+if not GEMINI_API_KEY:
+    raise ValueError("Missing GEMINI_API_KEY in environment variables")
+
+# Initialize Gemini for embeddings
+print("Initializing Gemini for embeddings...")
+genai.configure(api_key=GEMINI_API_KEY)
+print("Gemini embedding model configured successfully!")
 
 # Initialize Supabase client
 print("Initializing Supabase client...")
@@ -172,9 +176,13 @@ def process_pdfs():
             uploaded_count = 0
             for chunk_idx, chunk in enumerate(chunks, 1):
                 try:
-                    # Generate embedding for chunk
-                    embedding = model.encode(chunk, convert_to_numpy=True)
-                    embedding_list = embedding.tolist()
+                    # Generate embedding for chunk using Gemini
+                    embedding_result = genai.embed_content(
+                        model="models/text-embedding-004",
+                        content=chunk,
+                        task_type="RETRIEVAL_DOCUMENT"
+                    )
+                    embedding_list = embedding_result['embedding']
                     
                     # Create metadata
                     metadata = {
@@ -188,7 +196,7 @@ def process_pdfs():
                     # - content (text)
                     # - metadata (jsonb)
                     # - embedding (vector)
-                    result = supabase.table('mcs_documents').insert({
+                    insert_result = supabase.table('mcs_documents').insert({
                         'content': chunk,
                         'metadata': metadata,
                         'embedding': embedding_list

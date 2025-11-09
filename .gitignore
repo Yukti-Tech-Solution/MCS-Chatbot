@@ -1,18 +1,30 @@
-# Dependencies
-/node_modules
-/frontend/node_modules
-/backend/node_modules
+# Python
+__pycache__/
+*.py[cod]
+.Python
+*.pyc
 
-# Secrets and environment files
+# Environment variables
 .env
-*.env
-/backend/.env
-API_keys.txt
+backend/.env
+frontend/.env.local
 
-# Build folders
-/dist
-/build
+# PDFs
+backend/pdfs/*.pdf
 
-# OS files
+# Node
+node_modules/
+
+# Build
+frontend/dist/
+
+# IDE
+.vscode/
+.cursor/
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log

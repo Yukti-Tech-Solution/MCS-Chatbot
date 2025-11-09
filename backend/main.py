@@ -7,7 +7,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
 from supabase import create_client, Client
 from groq import Groq
 import google.generativeai as genai
@@ -83,11 +82,11 @@ if not all([GROQ_API_KEY, GEMINI_API_KEY, SUPABASE_URL, SUPABASE_KEY]):
 if not all([GROQ_API_KEY, GEMINI_API_KEY, SUPABASE_URL, SUPABASE_KEY]):
     raise ValueError("Missing required environment variables. Please check your .env file.")
 
-# Initialize SentenceTransformer model for embeddings
-# Using all-MiniLM-L6-v2: lightweight, fast, good quality
-print("Loading embedding model...")
-embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-print("Embedding model loaded successfully!")
+# Initialize Gemini for embeddings and LLM
+print("Initializing Gemini client...")
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel(GEMINI_MODEL)
+print("Gemini client initialized!")
 
 # Initialize Supabase client
 print("Initializing Supabase client...")
@@ -98,12 +97,6 @@ print("Supabase client initialized!")
 print("Initializing Groq client...")
 groq_client = Groq(api_key=GROQ_API_KEY)
 print("Groq client initialized!")
-
-# Initialize Gemini client
-print("Initializing Gemini client...")
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel(GEMINI_MODEL)
-print("Gemini client initialized!")
 
 
 # Pydantic models for request/response validation
@@ -123,6 +116,8 @@ def search_similar_documents(query: str, top_k: int = 3) -> list:
     """
     Search for similar documents in Supabase using vector similarity
     
+    Uses Gemini text-embedding-004 model for generating query embeddings.
+    
     Args:
         query: User's question string
         top_k: Number of top similar documents to retrieve (default: 3)
@@ -134,10 +129,14 @@ def search_similar_documents(query: str, top_k: int = 3) -> list:
         Exception: If embedding generation or database query fails
     """
     try:
-        # Generate embedding for the query
+        # Generate embedding for the query using Gemini
         print(f"Generating embedding for query: {query[:50]}...")
-        query_embedding = embedding_model.encode(query, convert_to_numpy=True)
-        query_embedding_list = query_embedding.tolist()
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=query,
+            task_type="RETRIEVAL_QUERY"
+        )
+        query_embedding_list = result['embedding']
         print("Embedding generated successfully!")
         
         # Query Supabase using RPC function for vector similarity search
@@ -424,6 +423,27 @@ async def chat(request: ChatRequest):
         )
 
 
+def escape_html_for_pdf(text: str) -> str:
+    """
+    Escape HTML special characters for ReportLab Paragraph
+    
+    Args:
+        text: Text to escape
+    
+    Returns:
+        Escaped text safe for ReportLab Paragraph
+    """
+    if not text:
+        return ""
+    # Escape ampersand first to avoid double-escaping
+    text = str(text).replace('&', '&amp;')
+    text = text.replace('<', '&lt;')
+    text = text.replace('>', '&gt;')
+    text = text.replace('"', '&quot;')
+    text = text.replace("'", '&apos;')
+    return text
+
+
 @app.post("/api/download-pdf")
 async def download_act_pdf(request: ChatRequest):
     """
@@ -446,20 +466,32 @@ async def download_act_pdf(request: ChatRequest):
         HTTPException: If question is empty, no documents found, or PDF generation fails
     """
     try:
-        # Import reportlab components for PDF generation
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.units import inch
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-        from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER
+        # Try importing reportlab - if it fails, provide clear error
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import inch
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+            from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER
+        except ImportError as import_err:
+            error_msg = f"ReportLab library not installed: {str(import_err)}. Please install it using: pip install reportlab==4.0.7"
+            print(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
         
         # Validate question is not empty
         question = request.question.strip()
         if not question:
             raise HTTPException(status_code=400, detail="Question cannot be empty")
         
+        print(f"PDF Download requested for question: {question[:50]}...")
+        
         # Search for relevant documents (get more for PDF - 5 instead of 3)
-        documents = search_similar_documents(question, top_k=5)
+        try:
+            documents = search_similar_documents(question, top_k=5)
+        except Exception as search_err:
+            error_msg = f"Failed to search documents: {str(search_err)}"
+            print(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
         
         # Check if documents were found
         if not documents or len(documents) == 0:
@@ -468,16 +500,23 @@ async def download_act_pdf(request: ChatRequest):
                 detail="No relevant information found for this query"
             )
         
+        print(f"Found {len(documents)} documents for PDF generation")
+        
         # Create PDF in memory buffer
         buffer = BytesIO()
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=A4,
-            topMargin=0.5*inch,
-            bottomMargin=0.5*inch,
-            leftMargin=0.75*inch,
-            rightMargin=0.75*inch
-        )
+        try:
+            doc = SimpleDocTemplate(
+                buffer,
+                pagesize=A4,
+                topMargin=0.5*inch,
+                bottomMargin=0.5*inch,
+                leftMargin=0.75*inch,
+                rightMargin=0.75*inch
+            )
+        except Exception as doc_err:
+            error_msg = f"Failed to create PDF document: {str(doc_err)}"
+            print(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
         
         # Define styles for PDF
         styles = getSampleStyleSheet()
@@ -527,68 +566,105 @@ async def download_act_pdf(request: ChatRequest):
         # Build PDF content
         story = []
         
-        # Title
-        story.append(Paragraph("Maharashtra Cooperative Societies Act", title_style))
-        story.append(Spacer(1, 0.1*inch))
-        
-        # User's question
-        story.append(Paragraph(f"<b>Query:</b> {question}", heading_style))
-        story.append(Spacer(1, 0.3*inch))
-        
-        # Add each relevant section
-        for i, doc_data in enumerate(documents, 1):
-            # Extract content and metadata
-            content = doc_data.get('content', '')
-            metadata = doc_data.get('metadata', {})
-            filename = metadata.get('filename', 'Unknown Document')
-            
-            # Section header
-            story.append(Paragraph(f"<b>Section {i}</b>", heading_style))
-            
-            # Source information
-            story.append(Paragraph(f"<i>Source: {filename}</i>", source_style))
+        try:
+            # Title
+            story.append(Paragraph("Maharashtra Cooperative Societies Act", title_style))
             story.append(Spacer(1, 0.1*inch))
             
-            # Content formatting for PDF
-            # ReportLab's Paragraph uses a subset of HTML-like tags
-            # We need to escape special characters but preserve newlines as breaks
-            # Strategy: split by newlines, escape each line, then join with <br/>
-            lines = content.split('\n')
-            escaped_lines = []
-            for line in lines:
-                # Escape HTML special characters in each line
-                line = line.replace('&', '&amp;')  # Must be first
-                line = line.replace('<', '&lt;')
-                line = line.replace('>', '&gt;')
-                escaped_lines.append(line)
-            # Join lines with <br/> tags for paragraph breaks
-            formatted_content = '<br/>'.join(escaped_lines)
+            # User's question - escape HTML characters
+            escaped_question = escape_html_for_pdf(question)
+            story.append(Paragraph(f"<b>Query:</b> {escaped_question}", heading_style))
+            story.append(Spacer(1, 0.3*inch))
             
-            story.append(Paragraph(formatted_content, body_style))
-            story.append(Spacer(1, 0.2*inch))
+            # Add each relevant section
+            for i, doc_data in enumerate(documents, 1):
+                try:
+                    # Extract content and metadata
+                    content = doc_data.get('content', '')
+                    metadata = doc_data.get('metadata', {})
+                    filename = metadata.get('filename', 'Unknown Document')
+                    
+                    # Skip if content is empty
+                    if not content or not content.strip():
+                        print(f"Warning: Document {i} has empty content, skipping...")
+                        continue
+                    
+                    # Section header
+                    story.append(Paragraph(f"<b>Section {i}</b>", heading_style))
+                    
+                    # Source information - escape filename
+                    escaped_filename = escape_html_for_pdf(filename)
+                    story.append(Paragraph(f"<i>Source: {escaped_filename}</i>", source_style))
+                    story.append(Spacer(1, 0.1*inch))
+                    
+                    # Content formatting for PDF
+                    # Split by newlines, escape each line, then join with <br/>
+                    lines = content.split('\n')
+                    escaped_lines = []
+                    for line in lines:
+                        # Skip empty lines or add them as breaks
+                        if not line.strip():
+                            escaped_lines.append("")
+                        else:
+                            # Escape HTML special characters
+                            escaped_line = escape_html_for_pdf(line)
+                            escaped_lines.append(escaped_line)
+                    
+                    # Join lines with <br/> tags for paragraph breaks
+                    formatted_content = '<br/>'.join(escaped_lines)
+                    
+                    # Limit content length to avoid PDF generation issues
+                    if len(formatted_content) > 50000:  # Limit to ~50KB of text per section
+                        formatted_content = formatted_content[:50000] + "<br/><br/><i>[Content truncated for PDF generation]</i>"
+                    
+                    story.append(Paragraph(formatted_content, body_style))
+                    story.append(Spacer(1, 0.2*inch))
+                    
+                    # Page break after each section except last
+                    if i < len(documents):
+                        story.append(PageBreak())
+                        
+                except Exception as section_err:
+                    print(f"Error processing document {i}: {str(section_err)}")
+                    # Continue with next document instead of failing completely
+                    continue
             
-            # Page break after each section except last
-            if i < len(documents):
-                story.append(PageBreak())
-        
-        # Footer with disclaimer
-        story.append(Spacer(1, 0.3*inch))
-        story.append(Paragraph(
-            "<i>This document is generated from the MCS Act Legal Assistant. "
-            "Please verify with official sources for legal proceedings.</i>",
-            source_style
-        ))
+            # Footer with disclaimer
+            story.append(Spacer(1, 0.3*inch))
+            story.append(Paragraph(
+                "<i>This document is generated from the MCS Act Legal Assistant. "
+                "Please verify with official sources for legal proceedings.</i>",
+                source_style
+            ))
+            
+        except Exception as content_err:
+            error_msg = f"Failed to build PDF content: {str(content_err)}"
+            print(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
         
         # Build PDF document
-        doc.build(story)
-        buffer.seek(0)
+        try:
+            doc.build(story)
+            buffer.seek(0)
+        except Exception as build_err:
+            error_msg = f"Failed to build PDF: {str(build_err)}"
+            print(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+        
+        # Get PDF bytes
+        pdf_bytes = buffer.getvalue()
+        if not pdf_bytes or len(pdf_bytes) == 0:
+            raise HTTPException(status_code=500, detail="Generated PDF is empty")
+        
+        print(f"PDF generated successfully, size: {len(pdf_bytes)} bytes")
         
         # Return as downloadable file
         return StreamingResponse(
-            buffer,
+            BytesIO(pdf_bytes),
             media_type="application/pdf",
             headers={
-                "Content-Disposition": f"attachment; filename=MCS_Act_Info.pdf"
+                "Content-Disposition": "attachment; filename=MCS_Act_Info.pdf",
+                "Content-Length": str(len(pdf_bytes))
             }
         )
         
@@ -596,7 +672,10 @@ async def download_act_pdf(request: ChatRequest):
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        print(f"Error generating PDF: {str(e)}")
+        error_msg = f"Unexpected error generating PDF: {str(e)}"
+        print(error_msg)
+        import traceback
+        print(traceback.format_exc())
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate PDF: {str(e)}"
@@ -614,7 +693,7 @@ async def health_check():
     return {
         "status": "healthy",
         "model": "loaded",
-        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2"
+        "embedding_model": "gemini-text-embedding-004"
     }
 
 

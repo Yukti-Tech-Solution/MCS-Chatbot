@@ -5,7 +5,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Message from './Message';
 import InputBox from './InputBox';
-import { sendMessage } from '../api';
+import RelatedLinks from './RelatedLinks';
+import QuickTopics from './QuickTopics';
+import { sendMessage, downloadPDF } from '../api';
 
 function ChatInterface() {
   // State management
@@ -13,6 +15,7 @@ function ChatInterface() {
   const [inputText, setInputText] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [lastQuestion, setLastQuestion] = useState('');
   
   // Ref for auto-scrolling
   const messagesEndRef = useRef(null);
@@ -29,8 +32,9 @@ function ChatInterface() {
   };
 
   // Handle sending a message
-  const handleSend = async () => {
-    const question = inputText.trim();
+  // Accepts optional question parameter for quick topics
+  const handleSend = async (questionParam = null) => {
+    const question = (questionParam || inputText).trim();
     
     if (!question || loading) {
       return;
@@ -54,12 +58,19 @@ function ChatInterface() {
       // Call API to get response
       const response = await sendMessage(question);
 
+      // Store the question for PDF download
+      setLastQuestion(question);
+
+      // Get related links from response
+      const links = response.related_links || [];
+
       // Add assistant response to chat
       const assistantMessage = {
         role: 'assistant',
         content: response.answer,
         timestamp: new Date(),
-        sources: response.sources || []
+        sources: response.sources || [],
+        links: links  // Include links in message for RelatedLinks component
       };
 
       setMessages(prev => [...prev, assistantMessage]);
@@ -87,6 +98,40 @@ function ChatInterface() {
   const handleInputChange = (value) => {
     setInputText(value);
     setError(null); // Clear error when user starts typing
+  };
+
+  // Handle PDF download
+  const handleDownloadPDF = async (question) => {
+    try {
+      setLoading(true);
+      
+      // Call API to download PDF
+      const blob = await downloadPDF(question);
+      
+      // Create download link and trigger download
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'MCS_Act_Info.pdf';
+      document.body.appendChild(a);
+      a.click();
+      
+      // Cleanup
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      
+    } catch (err) {
+      console.error('Error downloading PDF:', err);
+      setError(err.message || 'Failed to download PDF. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle quick topic click
+  const handleTopicClick = (query) => {
+    // Directly send the query without setting input text first
+    handleSend(query);
   };
 
   // Container styles
@@ -189,40 +234,35 @@ function ChatInterface() {
             <div>
               <div style={welcomeTitleStyle}>MCS Act Legal Assistant</div>
               <div style={welcomeSubtitleStyle}>
-                Ask anything about the Maharashtra Cooperative Societies Act. I’ll answer using the official documents and provide citations.
+                Ask anything about the Maharashtra Cooperative Societies Act. I'll answer using the official documents and provide citations in simple, easy-to-understand language.
               </div>
-              <div style={examplesGridStyle}>
-                {[
-                  'What are the requirements for forming a cooperative society?',
-                  'What is the procedure for registration?',
-                  'What are the rights and duties of members?',
-                  'How is the management committee elected?'
-                ].map((text, idx) => (
-                  <button
-                    key={idx}
-                    style={exampleButtonStyle}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = exampleButtonHover.background; e.currentTarget.style.borderColor = exampleButtonHover.borderColor; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = '#40414f'; e.currentTarget.style.borderColor = '#565869'; }}
-                    onClick={() => {
-                      setInputText(text);
-                      setTimeout(handleSend, 0);
-                    }}
-                  >
-                    {text}
-                  </button>
-                ))}
-              </div>
+              
+              {/* Quick Topics Component */}
+              <QuickTopics 
+                onTopicClick={handleTopicClick}
+                disabled={loading}
+              />
             </div>
           )}
 
           {/* Render all messages */}
           {messages.map((message, index) => (
-            <Message
-              key={index}
-              role={message.role}
-              content={message.content}
-              timestamp={message.timestamp}
-            />
+            <React.Fragment key={index}>
+              <Message
+                role={message.role}
+                content={message.content}
+                timestamp={message.timestamp}
+              />
+              
+              {/* Show Related Links after assistant message with links */}
+              {message.role === 'assistant' && message.links && message.links.length > 0 && index === messages.length - 1 && (
+                <RelatedLinks 
+                  links={message.links}
+                  onDownloadPDF={() => handleDownloadPDF(lastQuestion || messages[index - 1]?.content || '')}
+                  question={lastQuestion || messages[index - 1]?.content || ''}
+                />
+              )}
+            </React.Fragment>
           ))}
 
           {/* Loading indicator */}

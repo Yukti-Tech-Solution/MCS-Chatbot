@@ -47,3 +47,33 @@ export const checkHealth = async () => {
   }
 };
 
+/**
+ * Download PDF with relevant act sections for a question
+ * 
+ * @param {string} question - The user's question
+ * @returns {Promise<Blob>} PDF file as blob
+ * @throws {Error} If the API request fails
+ */
+export const downloadPDF = async (question) => {
+  try {
+    const response = await axios.post(
+      `${API_URL}/api/download-pdf`,
+      { question: question },
+      {
+        responseType: 'blob' // Important: receive binary data
+      }
+    );
+    return response.data;
+  } catch (error) {
+    console.error('PDF download error:', error);
+    
+    // Extract error message from response if available
+    const errorMessage = error.response?.data?.detail || 
+                        error.response?.data?.message || 
+                        error.message || 
+                        'Failed to download PDF';
+    
+    throw new Error(errorMessage);
+  }
+};
+

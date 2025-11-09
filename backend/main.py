@@ -5,6 +5,7 @@ Handles RAG-based question answering using Groq/Gemini and Supabase vector searc
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from supabase import create_client, Client
@@ -12,8 +13,11 @@ from groq import Groq
 import google.generativeai as genai
 import os
 import json
+import re
+from io import BytesIO
 from dotenv import load_dotenv
 from pathlib import Path
+from resources import get_relevant_links
 
 # Load environment variables from .env file (robust lookup)
 # 1) Load from current working directory if available
@@ -112,6 +116,7 @@ class ChatResponse(BaseModel):
     """Response model for chat endpoint"""
     answer: str
     sources: list
+    related_links: list = []  # Government resources and official links
 
 
 def search_similar_documents(query: str, top_k: int = 3) -> list:
@@ -178,26 +183,96 @@ def search_similar_documents(query: str, top_k: int = 3) -> list:
         raise Exception(f"Failed to search documents: {str(e)}")
 
 
+def simplify_legal_terms(text: str) -> str:
+    """
+    Replace common legal jargon with simple explanations in brackets
+    
+    This function helps non-technical users understand legal terms by
+    adding simple explanations right after complex terms.
+    
+    Args:
+        text: Response text with potential legal terms
+    
+    Returns:
+        Text with simplified legal terms (explanations added in brackets)
+    """
+    # Dictionary of legal terms and their simple explanations
+    legal_terms = {
+        "mutatis mutandis": "with necessary changes",
+        "prima facie": "at first glance / on the surface",
+        "ipso facto": "by that very fact / automatically",
+        "bona fide": "genuine / in good faith",
+        "caveat": "warning / condition",
+        "suo moto": "on its own / without being asked",
+        "ad hoc": "temporary / for this specific purpose",
+        "quorum": "minimum number of members needed",
+        "resolution": "official decision",
+        "bylaws": "society rules",
+        "AGM": "Annual General Meeting (yearly meeting of all members)",
+        "nominee": "person appointed to represent",
+        "proxy": "someone authorized to vote on your behalf",
+        "arrears": "unpaid dues / pending payments",
+        "audit": "official checking of accounts"
+    }
+    
+    result_text = text
+    for term, explanation in legal_terms.items():
+        # Case-insensitive replacement with explanation in brackets
+        # Only replace if not already explained (avoid duplicates)
+        pattern = re.compile(re.escape(term), re.IGNORECASE)
+        # Check if term is already followed by an explanation in brackets
+        if not re.search(re.escape(term) + r'\s*\([^)]*\)', result_text, re.IGNORECASE):
+            result_text = pattern.sub(f"{term} ({explanation})", result_text)
+    
+    return result_text
+
+
 def generate_response(question: str, context: str) -> str:
     """
     Generate response using LLM (Groq first, Gemini as fallback)
+    
+    Uses a detailed system prompt to ensure responses are in simple language
+    suitable for non-technical society members.
     
     Args:
         question: User's question
         context: Retrieved context from documents
     
     Returns:
-        Generated answer string
+        Generated answer string with simplified legal terms
     
     Raises:
         Exception: If both LLM APIs fail
     """
-    # Create system prompt for legal assistant
-    system_prompt = """You are a legal assistant specialized in Maharashtra Cooperative Societies Act.
-Answer questions based ONLY on the provided context.
-Cite specific act sections when applicable.
-If information is not in context, say 'I don't have information about this in the MCS Act documents.'
-Be clear, concise, and helpful."""
+    # Create detailed system prompt for legal assistant
+    # This prompt ensures responses are user-friendly and practical
+    system_prompt = """You are a helpful legal assistant for Maharashtra Cooperative Societies Act, speaking to regular society members (not lawyers).
+
+IMPORTANT INSTRUCTIONS:
+
+1. Use SIMPLE, everyday language - avoid legal jargon
+
+2. If you must use legal terms, explain them in brackets like: "mutation (transfer of property rights)"
+
+3. Give practical examples from daily society life
+
+4. Break complex answers into numbered steps
+
+5. Always cite the specific Act section number
+
+6. If information is not in context, say "I don't have this specific information in the MCS Act documents I have access to."
+
+7. Be empathetic and helpful - remember users may be stressed about society issues
+
+RESPONSE FORMAT:
+
+- Start with a brief, clear answer (2-3 sentences)
+
+- Then provide detailed explanation
+
+- End with "Relevant Act: Section X of MCS Act"
+
+- Add "💡 Tip:" for practical advice when relevant"""
 
     # Create user prompt with context and question
     user_prompt = f"""Context from MCS Act:
@@ -206,7 +281,7 @@ Be clear, concise, and helpful."""
 
 Question: {question}
 
-Provide a detailed answer with act section references if applicable."""
+Provide a detailed answer with act section references if applicable. Use simple language and explain any legal terms."""
 
     # Try Groq API first
     try:
@@ -229,6 +304,10 @@ Provide a detailed answer with act section references if applicable."""
         
         response_text = chat_completion.choices[0].message.content
         print("Response generated successfully with Groq!")
+        
+        # Simplify legal terms before returning
+        response_text = simplify_legal_terms(response_text)
+        
         return response_text
         
     except Exception as groq_error:
@@ -250,6 +329,10 @@ Provide a detailed answer with act section references if applicable."""
             
             response_text = response.text
             print("Response generated successfully with Gemini!")
+            
+            # Simplify legal terms before returning
+            response_text = simplify_legal_terms(response_text)
+            
             return response_text
             
         except Exception as gemini_error:
@@ -287,9 +370,12 @@ async def chat(request: ChatRequest):
         
         # Step 2: Check if documents were found
         if not documents or len(documents) == 0:
+            # Still get general links even if no documents found
+            related_links = get_relevant_links(question, "")
             return ChatResponse(
                 answer="I couldn't find any relevant information in the MCS Act documents. Please try rephrasing your question or ensure that PDFs have been processed and uploaded to the database.",
-                sources=[]
+                sources=[],
+                related_links=related_links
             )
         
         # Step 3: Combine document contents into context string
@@ -317,10 +403,14 @@ async def chat(request: ChatRequest):
         # Step 4: Generate response using LLM
         answer = generate_response(question, context)
         
-        # Step 5: Return response with sources
+        # Step 5: Get relevant government links based on question and context
+        related_links = get_relevant_links(question, context)
+        
+        # Step 6: Return response with sources and related links
         return ChatResponse(
             answer=answer,
-            sources=sources
+            sources=sources,
+            related_links=related_links
         )
         
     except HTTPException:
@@ -331,6 +421,185 @@ async def chat(request: ChatRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
+        )
+
+
+@app.post("/api/download-pdf")
+async def download_act_pdf(request: ChatRequest):
+    """
+    Generate and download a PDF with relevant act sections
+    
+    This endpoint creates a PDF document containing the relevant MCS Act
+    sections based on the user's question. The PDF includes:
+    - User's question
+    - Relevant document sections
+    - Source information
+    - Footer disclaimer
+    
+    Args:
+        request: ChatRequest with question field
+    
+    Returns:
+        PDF file as downloadable stream
+    
+    Raises:
+        HTTPException: If question is empty, no documents found, or PDF generation fails
+    """
+    try:
+        # Import reportlab components for PDF generation
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+        from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER
+        
+        # Validate question is not empty
+        question = request.question.strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="Question cannot be empty")
+        
+        # Search for relevant documents (get more for PDF - 5 instead of 3)
+        documents = search_similar_documents(question, top_k=5)
+        
+        # Check if documents were found
+        if not documents or len(documents) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="No relevant information found for this query"
+            )
+        
+        # Create PDF in memory buffer
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            topMargin=0.5*inch,
+            bottomMargin=0.5*inch,
+            leftMargin=0.75*inch,
+            rightMargin=0.75*inch
+        )
+        
+        # Define styles for PDF
+        styles = getSampleStyleSheet()
+        
+        # Custom title style - centered, dark blue, larger font
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=18,
+            textColor='darkblue',
+            alignment=TA_CENTER,
+            spaceAfter=12,
+            fontName='Helvetica-Bold'
+        )
+        
+        # Custom heading style - dark green, medium font
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontSize=14,
+            textColor='darkgreen',
+            spaceAfter=8,
+            spaceBefore=12,
+            fontName='Helvetica-Bold'
+        )
+        
+        # Custom body style - justified text, readable font size
+        body_style = ParagraphStyle(
+            'CustomBody',
+            parent=styles['BodyText'],
+            fontSize=11,
+            alignment=TA_JUSTIFY,
+            spaceAfter=8,
+            leading=14
+        )
+        
+        # Custom source style - italic, smaller font
+        source_style = ParagraphStyle(
+            'CustomSource',
+            parent=styles['BodyText'],
+            fontSize=10,
+            textColor='gray',
+            fontName='Helvetica-Oblique',
+            spaceAfter=6
+        )
+        
+        # Build PDF content
+        story = []
+        
+        # Title
+        story.append(Paragraph("Maharashtra Cooperative Societies Act", title_style))
+        story.append(Spacer(1, 0.1*inch))
+        
+        # User's question
+        story.append(Paragraph(f"<b>Query:</b> {question}", heading_style))
+        story.append(Spacer(1, 0.3*inch))
+        
+        # Add each relevant section
+        for i, doc_data in enumerate(documents, 1):
+            # Extract content and metadata
+            content = doc_data.get('content', '')
+            metadata = doc_data.get('metadata', {})
+            filename = metadata.get('filename', 'Unknown Document')
+            
+            # Section header
+            story.append(Paragraph(f"<b>Section {i}</b>", heading_style))
+            
+            # Source information
+            story.append(Paragraph(f"<i>Source: {filename}</i>", source_style))
+            story.append(Spacer(1, 0.1*inch))
+            
+            # Content formatting for PDF
+            # ReportLab's Paragraph uses a subset of HTML-like tags
+            # We need to escape special characters but preserve newlines as breaks
+            # Strategy: split by newlines, escape each line, then join with <br/>
+            lines = content.split('\n')
+            escaped_lines = []
+            for line in lines:
+                # Escape HTML special characters in each line
+                line = line.replace('&', '&amp;')  # Must be first
+                line = line.replace('<', '&lt;')
+                line = line.replace('>', '&gt;')
+                escaped_lines.append(line)
+            # Join lines with <br/> tags for paragraph breaks
+            formatted_content = '<br/>'.join(escaped_lines)
+            
+            story.append(Paragraph(formatted_content, body_style))
+            story.append(Spacer(1, 0.2*inch))
+            
+            # Page break after each section except last
+            if i < len(documents):
+                story.append(PageBreak())
+        
+        # Footer with disclaimer
+        story.append(Spacer(1, 0.3*inch))
+        story.append(Paragraph(
+            "<i>This document is generated from the MCS Act Legal Assistant. "
+            "Please verify with official sources for legal proceedings.</i>",
+            source_style
+        ))
+        
+        # Build PDF document
+        doc.build(story)
+        buffer.seek(0)
+        
+        # Return as downloadable file
+        return StreamingResponse(
+            buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename=MCS_Act_Info.pdf"
+            }
+        )
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        print(f"Error generating PDF: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate PDF: {str(e)}"
         )
 
 

@@ -1,0 +1,18 @@
+# Dependencies
+/node_modules
+/frontend/node_modules
+/backend/node_modules
+
+# Secrets and environment files
+.env
+*.env
+/backend/.env
+API_keys.txt
+
+# Build folders
+/dist
+/build
+
+# OS files
+.DS_Store
+Thumbs.db
